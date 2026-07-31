@@ -78,13 +78,26 @@ Event metadata is stored in SQLite and images are stored under
 deletes its oldest records and files automatically when the limit is exceeded.
 The dashboard loads the most recent events through private Tailscale HTTPS.
 The capture card provides server-side pagination with 10, 20, 50, or 100 images
-per page and a confirmation-protected **Delete all** action.
+per page. Presets for today, the last 24 hours, and the last seven days sit
+alongside a custom local date-time range picker. The active range can be deleted
+independently, while the confirmation-protected **Delete all** action remains
+available for clearing the complete archive.
 Camera API CORS is currently limited to the local dashboard origins. Add the
 exact production Vercel origin to `TEGAR_CAMERA_ALLOWED_ORIGINS` on the Pi when
 the production URL is known.
 
 Face detection does not perform face recognition, identify a person, or store
 a biometric profile.
+
+### Remote camera settings
+
+The camera card keeps advanced controls inside a slide-over panel. The dashboard
+can remotely enable or disable edge detection and adjust person confidence,
+capture interval, stream FPS, JPEG quality, horizontal mirroring, brightness,
+contrast, saturation, and backlight compensation. Settings are validated by the
+Pi and persisted in `/var/lib/tegar-camera/config.json`, so they survive a
+service restart. Brightness, contrast, saturation, and backlight compensation
+map to controls exposed by the connected UVC webcam.
 
 ### Pi runtime
 

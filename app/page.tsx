@@ -61,6 +61,7 @@ type CameraStatus = {
     personConfidence: number;
     threshold: number;
     captureIntervalSeconds: number;
+    detectionEnabled: boolean;
     lastEventAt?: string | null;
   };
   captures: CaptureStorage;
@@ -91,6 +92,29 @@ type EventsResponse = {
     totalPages: number;
   };
 };
+
+type CameraConfig = {
+  detectionEnabled: boolean;
+  streamFps: number;
+  jpegQuality: number;
+  captureIntervalSeconds: number;
+  personThreshold: number;
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  backlightCompensation: boolean;
+  flipHorizontal: boolean;
+};
+
+type CameraConfigResponse = {
+  config: CameraConfig;
+  capabilities: Record<
+    string,
+    { min: number; max: number; step: number }
+  >;
+};
+
+type CaptureFilterMode = "all" | "today" | "24h" | "7d" | "custom";
 
 type HistoryRange = "minute" | "hour" | "day" | "month";
 
@@ -155,6 +179,7 @@ const initialCamera: CameraStatus = {
     personConfidence: 0,
     threshold: 0.6,
     captureIntervalSeconds: 5,
+    detectionEnabled: true,
   },
   captures: {
     count: 0,
@@ -163,10 +188,66 @@ const initialCamera: CameraStatus = {
   },
 };
 
+const initialCameraConfig: CameraConfig = {
+  detectionEnabled: true,
+  streamFps: 10,
+  jpegQuality: 82,
+  captureIntervalSeconds: 5,
+  personThreshold: 0.6,
+  brightness: 0,
+  contrast: 34,
+  saturation: 45,
+  backlightCompensation: false,
+  flipHorizontal: false,
+};
+
+const defaultCameraCapabilities: CameraConfigResponse["capabilities"] = {
+  streamFps: { min: 2, max: 15, step: 1 },
+  jpegQuality: { min: 50, max: 95, step: 1 },
+  captureIntervalSeconds: { min: 2, max: 300, step: 1 },
+  personThreshold: { min: 0.5, max: 0.95, step: 0.01 },
+  brightness: { min: -128, max: 127, step: 1 },
+  contrast: { min: 0, max: 63, step: 1 },
+  saturation: { min: 0, max: 128, step: 1 },
+};
+
 function measurementAge(seconds: number | null | undefined) {
   if (seconds === null || seconds === undefined) return "Waiting for first reading";
   if (seconds < 60) return `Updated ${Math.max(1, Math.round(seconds))}s ago`;
   return `Updated ${Math.round(seconds / 60)}m ago`;
+}
+
+function toLocalDateTimeInput(value: Date) {
+  const local = new Date(value.getTime() - value.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+function resolveCaptureRange(
+  mode: CaptureFilterMode,
+  customFrom: string | null,
+  customTo: string | null,
+) {
+  const now = new Date();
+  if (mode === "all") return { from: null, to: null };
+  if (mode === "custom") return { from: customFrom, to: customTo };
+  if (mode === "today") {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    return { from: start.toISOString(), to: now.toISOString() };
+  }
+  const hours = mode === "24h" ? 24 : 7 * 24;
+  return {
+    from: new Date(now.getTime() - hours * 60 * 60 * 1000).toISOString(),
+    to: now.toISOString(),
+  };
+}
+
+function captureFilterLabel(mode: CaptureFilterMode) {
+  if (mode === "today") return "Today";
+  if (mode === "24h") return "Last 24 hours";
+  if (mode === "7d") return "Last 7 days";
+  if (mode === "custom") return "Custom range";
+  return "All time";
 }
 
 function clamp(value: number, min = 0, max = 100) {
@@ -425,6 +506,49 @@ function ClimateHistoryChart({
   );
 }
 
+function CameraRangeControl({
+  label,
+  value,
+  min,
+  max,
+  step,
+  suffix = "",
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  suffix?: string;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="camera-range-control">
+      <span>
+        {label}
+        <strong>
+          {value}
+          {suffix}
+        </strong>
+      </span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+      />
+      <small>
+        {min}
+        {suffix} — {max}
+        {suffix}
+      </small>
+    </label>
+  );
+}
+
 export default function Home() {
   const clientRef = useRef<MqttClient | null>(null);
   const [brokerConnected, setBrokerConnected] = useState(false);
@@ -446,6 +570,29 @@ export default function Home() {
     total: 0,
     totalPages: 1,
   });
+  const [captureFilterMode, setCaptureFilterMode] =
+    useState<CaptureFilterMode>("all");
+  const [customCaptureFrom, setCustomCaptureFrom] = useState<string | null>(
+    null,
+  );
+  const [customCaptureTo, setCustomCaptureTo] = useState<string | null>(null);
+  const [filterPanelOpen, setFilterPanelOpen] = useState(false);
+  const [filterDraftFrom, setFilterDraftFrom] = useState("");
+  const [filterDraftTo, setFilterDraftTo] = useState("");
+  const [filterError, setFilterError] = useState<string | null>(null);
+  const [cameraConfigOpen, setCameraConfigOpen] = useState(false);
+  const [cameraConfig, setCameraConfig] =
+    useState<CameraConfig>(initialCameraConfig);
+  const [cameraConfigDraft, setCameraConfigDraft] =
+    useState<CameraConfig>(initialCameraConfig);
+  const [cameraCapabilities, setCameraCapabilities] = useState(
+    defaultCameraCapabilities,
+  );
+  const [cameraConfigLoading, setCameraConfigLoading] = useState(false);
+  const [cameraConfigSaving, setCameraConfigSaving] = useState(false);
+  const [cameraConfigError, setCameraConfigError] = useState<string | null>(
+    null,
+  );
   const [historyRange, setHistoryRange] = useState<HistoryRange>("minute");
   const [history, setHistory] = useState<HistoryResponse>({
     range: "minute",
@@ -526,8 +673,19 @@ export default function Home() {
       const next = (await healthResponse.json()) as CameraStatus;
       setCamera((current) => ({ ...current, ...next, error: null }));
 
+      const captureRange = resolveCaptureRange(
+        captureFilterMode,
+        customCaptureFrom,
+        customCaptureTo,
+      );
+      const eventQuery = new URLSearchParams({
+        page: String(eventsPage),
+        perPage: String(eventsPerPage),
+      });
+      if (captureRange.from) eventQuery.set("from", captureRange.from);
+      if (captureRange.to) eventQuery.set("to", captureRange.to);
       const eventsResponse = await fetch(
-        `${CAMERA_BASE_URL}/events?page=${eventsPage}&perPage=${eventsPerPage}`,
+        `${CAMERA_BASE_URL}/events?${eventQuery.toString()}`,
         { cache: "no-store" },
       );
       if (!eventsResponse.ok) throw new Error("Person event request failed");
@@ -554,7 +712,13 @@ export default function Home() {
     } finally {
       if (showLoading) setEventsLoading(false);
     }
-  }, [eventsPage, eventsPerPage]);
+  }, [
+    captureFilterMode,
+    customCaptureFrom,
+    customCaptureTo,
+    eventsPage,
+    eventsPerPage,
+  ]);
 
   useEffect(() => {
     const initial = window.setTimeout(() => refreshEdgeData(), 0);
@@ -593,6 +757,167 @@ export default function Home() {
       window.clearInterval(interval);
     };
   }, [refreshHistory]);
+
+  const loadCameraConfig = useCallback(async () => {
+    setCameraConfigLoading(true);
+    setCameraConfigError(null);
+    try {
+      const response = await fetch(`${CAMERA_BASE_URL}/config`, {
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error("Camera config request failed");
+      const result = (await response.json()) as CameraConfigResponse;
+      setCameraConfig(result.config);
+      setCameraConfigDraft(result.config);
+      setCameraCapabilities(result.capabilities);
+    } catch {
+      setCameraConfigError(
+        "Camera settings are unreachable. Check the Tailscale connection.",
+      );
+    } finally {
+      setCameraConfigLoading(false);
+    }
+  }, []);
+
+  const openCameraConfig = () => {
+    setCameraConfigOpen(true);
+    void loadCameraConfig();
+  };
+
+  const saveCameraConfig = async () => {
+    setCameraConfigSaving(true);
+    setCameraConfigError(null);
+    try {
+      const response = await fetch(`${CAMERA_BASE_URL}/config`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cameraConfigDraft),
+      });
+      if (!response.ok) throw new Error("Camera config update failed");
+      const result = (await response.json()) as CameraConfigResponse;
+      setCameraConfig(result.config);
+      setCameraConfigDraft(result.config);
+      setCameraCapabilities(result.capabilities);
+      setCamera((current) => ({
+        ...current,
+        fps: result.config.streamFps,
+        vision: {
+          ...current.vision,
+          detectionEnabled: result.config.detectionEnabled,
+          threshold: result.config.personThreshold,
+          captureIntervalSeconds: result.config.captureIntervalSeconds,
+        },
+      }));
+      setMessage("Camera settings saved on tegar-pi.");
+      setCameraConfigOpen(false);
+    } catch {
+      setCameraConfigError("Could not save camera settings through Tailscale.");
+    } finally {
+      setCameraConfigSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!cameraConfigOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCameraConfigOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [cameraConfigOpen]);
+
+  const applyCapturePreset = (mode: CaptureFilterMode) => {
+    setCaptureFilterMode(mode);
+    setEventsPage(1);
+    setFilterPanelOpen(false);
+    setFilterError(null);
+  };
+
+  const openCustomCaptureFilter = () => {
+    const now = new Date();
+    const previousDay = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    setFilterDraftFrom(
+      customCaptureFrom
+        ? toLocalDateTimeInput(new Date(customCaptureFrom))
+        : toLocalDateTimeInput(previousDay),
+    );
+    setFilterDraftTo(
+      customCaptureTo
+        ? toLocalDateTimeInput(new Date(customCaptureTo))
+        : toLocalDateTimeInput(now),
+    );
+    setFilterError(null);
+    setFilterPanelOpen(true);
+  };
+
+  const applyCustomCaptureFilter = () => {
+    const from = new Date(filterDraftFrom);
+    const to = new Date(filterDraftTo);
+    if (
+      !filterDraftFrom ||
+      !filterDraftTo ||
+      Number.isNaN(from.getTime()) ||
+      Number.isNaN(to.getTime())
+    ) {
+      setFilterError("Choose both the start and end date-time.");
+      return;
+    }
+    if (from >= to) {
+      setFilterError("The end date-time must be after the start.");
+      return;
+    }
+    setCustomCaptureFrom(from.toISOString());
+    setCustomCaptureTo(to.toISOString());
+    setCaptureFilterMode("custom");
+    setEventsPage(1);
+    setFilterPanelOpen(false);
+    setFilterError(null);
+  };
+
+  const deleteFilteredEvents = async () => {
+    if (captureFilterMode === "all") return;
+    const range = resolveCaptureRange(
+      captureFilterMode,
+      customCaptureFrom,
+      customCaptureTo,
+    );
+    if (!range.from || !range.to) return;
+    if (
+      !window.confirm(
+        `Delete ${eventsPagination.total} captures in “${captureFilterLabel(captureFilterMode)}”? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setEventsDeleting(true);
+    setEventsError(null);
+    try {
+      const query = new URLSearchParams({ from: range.from, to: range.to });
+      const response = await fetch(
+        `${CAMERA_BASE_URL}/events?${query.toString()}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) throw new Error("Range delete request failed");
+      const result = (await response.json()) as {
+        deleted: number;
+        storage: CaptureStorage;
+      };
+      setPersonEvents([]);
+      setEventsPage(1);
+      setEventsPagination({
+        page: 1,
+        perPage: eventsPerPage,
+        total: 0,
+        totalPages: 1,
+      });
+      setCamera((current) => ({ ...current, captures: result.storage }));
+      setMessage(`${result.deleted} captures deleted from the selected range.`);
+    } catch {
+      setEventsError("Could not delete the selected range through Tailscale.");
+    } finally {
+      setEventsDeleting(false);
+    }
+  };
 
   const deleteAllEvents = async () => {
     if (
@@ -703,6 +1028,12 @@ export default function Home() {
     eventsPagination.total,
     eventsPagination.page * eventsPagination.perPage,
   );
+  const activeCaptureFilterLabel =
+    captureFilterMode === "custom" && customCaptureFrom && customCaptureTo
+      ? `${formatEventTime(customCaptureFrom)} → ${formatEventTime(customCaptureTo)}`
+      : captureFilterLabel(captureFilterMode);
+  const cameraConfigDirty =
+    JSON.stringify(cameraConfigDraft) !== JSON.stringify(cameraConfig);
   const latestHistoryPoint = history.points.at(-1) ?? null;
   const historyStorageLevel = clamp(
     (history.storage.databaseBytes / Math.max(1, history.storage.limitBytes)) *
@@ -742,21 +1073,23 @@ export default function Home() {
             <span className="device-tag">tegar-pi</span>
           </div>
 
-          <div className="led-stage">
+          <div className="led-compact">
             <div
               className={`led-orbit mode-${selectedMode}`}
               style={{ "--blink-duration": `${intervalMs * 2}ms` } as React.CSSProperties}
             >
               <div className="led-core" />
             </div>
-            <p className="mode-readout">{selectedMode}</p>
-            <p className="mode-caption">
-              {selectedMode === "blink"
-                ? `${blinkFrequency} pulses per second`
-                : selectedMode === "on"
-                  ? "Indicator held on"
-                  : "Indicator held off"}
-            </p>
+            <div>
+              <p className="mode-readout">{selectedMode}</p>
+              <p className="mode-caption">
+                {selectedMode === "blink"
+                  ? `${blinkFrequency} pulses/sec · ${intervalMs} ms`
+                  : selectedMode === "on"
+                    ? "Indicator held on"
+                    : "Indicator held off"}
+              </p>
+            </div>
           </div>
 
           <div className="mode-grid" role="group" aria-label="LED mode">
@@ -773,29 +1106,28 @@ export default function Home() {
             ))}
           </div>
 
-          <div className={`slider-panel ${selectedMode !== "blink" ? "muted" : ""}`}>
-            <div className="slider-copy">
-              <div>
-                <p className="section-label">Blink intensity</p>
-                <h3>{intervalMs} ms</h3>
+          {selectedMode === "blink" && (
+            <div className="slider-panel compact-slider">
+              <div className="slider-copy">
+                <p className="section-label">Blink speed</p>
+                <span>{intervalMs} ms</span>
               </div>
-              <span>{blinkFrequency} Hz</span>
+              <input
+                aria-label="Blink interval"
+                type="range"
+                min="100"
+                max="2000"
+                step="100"
+                value={intervalMs}
+                onChange={(event) => handleInterval(Number(event.target.value))}
+                disabled={!brokerConnected}
+              />
+              <div className="range-labels">
+                <span>Fast</span>
+                <span>Slow</span>
+              </div>
             </div>
-            <input
-              aria-label="Blink interval"
-              type="range"
-              min="100"
-              max="2000"
-              step="100"
-              value={intervalMs}
-              onChange={(event) => handleInterval(Number(event.target.value))}
-              disabled={selectedMode !== "blink" || !brokerConnected}
-            />
-            <div className="range-labels">
-              <span>Fast</span>
-              <span>Slow</span>
-            </div>
-          </div>
+          )}
         </article>
 
         <aside className="side-column">
@@ -1043,15 +1375,24 @@ export default function Home() {
               </InfoTip>
             </div>
           </div>
-          <div className={`camera-status ${camera.streaming ? "live" : ""}`}>
-            <span />
-            {!camera.online
-              ? "Camera agent offline"
-              : !camera.cameraDetected
-                ? "Webcam missing"
-                : camera.streaming
-                  ? `Live · ${camera.fps ?? 2} FPS`
-                  : "Camera ready"}
+          <div className="camera-heading-actions">
+            <div className={`camera-status ${camera.streaming ? "live" : ""}`}>
+              <span />
+              {!camera.online
+                ? "Camera agent offline"
+                : !camera.cameraDetected
+                  ? "Webcam missing"
+                  : camera.streaming
+                    ? `Live · ${camera.fps ?? 2} FPS`
+                    : "Camera ready"}
+            </div>
+            <button
+              className="camera-config-trigger"
+              onClick={openCameraConfig}
+              disabled={!camera.online}
+            >
+              Configure
+            </button>
           </div>
         </div>
 
@@ -1086,7 +1427,7 @@ export default function Home() {
             <div className="camera-loading">Requesting camera…</div>
           )}
           {camera.streaming && <span className="live-badge">LIVE</span>}
-          {camera.vision.ready && (
+          {camera.vision.ready && camera.vision.detectionEnabled && (
             <span className="vision-badge">
               EDGE AI · {camera.vision.inferenceFps.toFixed(1)} FPS
             </span>
@@ -1109,7 +1450,13 @@ export default function Home() {
           </button>
         </div>
 
-        <div className={`vision-panel ${camera.vision.ready ? "enabled" : ""}`}>
+        <div
+          className={`vision-panel ${
+            camera.vision.ready && camera.vision.detectionEnabled
+              ? "enabled"
+              : ""
+          }`}
+        >
           <div className="vision-heading">
             <div>
               <span className="vision-kicker">Raspberry Pi edge computing</span>
@@ -1127,7 +1474,9 @@ export default function Home() {
               >
                 {camera.vision.personPresent
                   ? `Person ${Math.round(camera.vision.personConfidence * 100)}%`
-                  : camera.vision.ready
+                  : !camera.vision.detectionEnabled
+                    ? "Detection off"
+                    : camera.vision.ready
                     ? "Vision running"
                     : "Vision starting"}
               </span>
@@ -1160,7 +1509,9 @@ export default function Home() {
           <div className="vision-results">
             <span>Current scene</span>
             <strong>
-              {camera.vision.labels.length
+              {!camera.vision.detectionEnabled
+                ? "Detection disabled"
+                : camera.vision.labels.length
                 ? camera.vision.labels.join(" · ")
                 : camera.vision.ready
                   ? "No recognized objects"
@@ -1186,8 +1537,9 @@ export default function Home() {
               <InfoTip title="Capture retention">
                 A new image can be saved every{" "}
                 {camera.vision.captureIntervalSeconds} seconds while a person is
-                detected above 60% confidence. The oldest files are removed
-                after 500 MiB.
+                detected above{" "}
+                {Math.round(camera.vision.threshold * 100)}% confidence. The
+                oldest files are removed after 500 MiB.
                 {estimatedCaptureCapacity
                   ? ` Current image sizes indicate room for roughly ${estimatedCaptureCapacity.toLocaleString("id-ID")} captures.`
                   : ""}
@@ -1205,7 +1557,7 @@ export default function Home() {
             <button
               className="capture-delete"
               onClick={deleteAllEvents}
-              disabled={!personEvents.length || eventsDeleting}
+              disabled={camera.captures.count === 0 || eventsDeleting}
             >
               {eventsDeleting ? "Deleting…" : "Delete all"}
             </button>
@@ -1224,6 +1576,91 @@ export default function Home() {
         </div>
         <div className="storage-meter" aria-label={`${storageLevel}% storage used`}>
           <span style={{ width: `${storageLevel}%` }} />
+        </div>
+
+        <div className="capture-filterbar">
+          <div
+            className="capture-filter-presets"
+            role="group"
+            aria-label="Capture date range"
+          >
+            {(
+              [
+                ["all", "All"],
+                ["today", "Today"],
+                ["24h", "24h"],
+                ["7d", "7 days"],
+              ] as Array<[CaptureFilterMode, string]>
+            ).map(([mode, label]) => (
+              <button
+                key={mode}
+                className={captureFilterMode === mode ? "active" : ""}
+                onClick={() => applyCapturePreset(mode)}
+              >
+                {label}
+              </button>
+            ))}
+            <button
+              className={captureFilterMode === "custom" ? "active" : ""}
+              onClick={openCustomCaptureFilter}
+            >
+              Custom
+            </button>
+          </div>
+          <div className="capture-filter-summary">
+            <span>Showing</span>
+            <strong>{activeCaptureFilterLabel}</strong>
+          </div>
+          {captureFilterMode !== "all" && (
+            <button
+              className="capture-delete-range"
+              onClick={deleteFilteredEvents}
+              disabled={eventsPagination.total === 0 || eventsDeleting}
+            >
+              Delete range
+            </button>
+          )}
+          {filterPanelOpen && (
+            <div
+              className="capture-filter-popover"
+              role="dialog"
+              aria-label="Custom capture date range"
+            >
+              <div className="capture-filter-popover-heading">
+                <strong>Custom date & time</strong>
+                <button
+                  onClick={() => setFilterPanelOpen(false)}
+                  aria-label="Close custom range"
+                >
+                  ×
+                </button>
+              </div>
+              <label>
+                <span>From</span>
+                <input
+                  type="datetime-local"
+                  value={filterDraftFrom}
+                  onChange={(event) => setFilterDraftFrom(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>To</span>
+                <input
+                  type="datetime-local"
+                  value={filterDraftTo}
+                  min={filterDraftFrom}
+                  onChange={(event) => setFilterDraftTo(event.target.value)}
+                />
+              </label>
+              {filterError && <p>{filterError}</p>}
+              <button
+                className="capture-filter-apply"
+                onClick={applyCustomCaptureFilter}
+              >
+                Apply range
+              </button>
+            </div>
+          )}
         </div>
 
         {personEvents.length ? (
@@ -1311,6 +1748,233 @@ export default function Home() {
         )}
         {eventsError && <p className="camera-error">{eventsError}</p>}
       </section>
+
+      {cameraConfigOpen && (
+        <div
+          className="camera-config-overlay"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setCameraConfigOpen(false);
+            }
+          }}
+        >
+          <aside
+            className="camera-config-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="camera-config-title"
+          >
+            <div className="camera-config-header">
+              <div>
+                <p className="section-label">Remote camera</p>
+                <h2 id="camera-config-title">Camera settings</h2>
+              </div>
+              <button
+                onClick={() => setCameraConfigOpen(false)}
+                aria-label="Close camera settings"
+              >
+                ×
+              </button>
+            </div>
+
+            {cameraConfigLoading ? (
+              <div className="camera-config-loading">Loading Pi settings…</div>
+            ) : (
+              <div className="camera-config-body">
+                <section>
+                  <div className="camera-config-section-title">
+                    <strong>Edge detection</strong>
+                    <InfoTip title="Detection control">
+                      Turning detection off stops NanoDet, face detection, and
+                      automatic person captures while keeping the video stream
+                      available.
+                    </InfoTip>
+                  </div>
+                  <label className="camera-toggle">
+                    <span>
+                      <strong>Object & person detection</strong>
+                      <small>Run AI inference on the Raspberry Pi</small>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={cameraConfigDraft.detectionEnabled}
+                      onChange={(event) =>
+                        setCameraConfigDraft((current) => ({
+                          ...current,
+                          detectionEnabled: event.target.checked,
+                        }))
+                      }
+                    />
+                  </label>
+                  <CameraRangeControl
+                    label="Person confidence"
+                    value={Math.round(
+                      cameraConfigDraft.personThreshold * 100,
+                    )}
+                    min={Math.round(
+                      cameraCapabilities.personThreshold.min * 100,
+                    )}
+                    max={Math.round(
+                      cameraCapabilities.personThreshold.max * 100,
+                    )}
+                    step={Math.round(
+                      cameraCapabilities.personThreshold.step * 100,
+                    )}
+                    suffix="%"
+                    onChange={(value) =>
+                      setCameraConfigDraft((current) => ({
+                        ...current,
+                        personThreshold: value / 100,
+                      }))
+                    }
+                  />
+                  <CameraRangeControl
+                    label="Capture interval"
+                    value={cameraConfigDraft.captureIntervalSeconds}
+                    {...cameraCapabilities.captureIntervalSeconds}
+                    suffix="s"
+                    onChange={(value) =>
+                      setCameraConfigDraft((current) => ({
+                        ...current,
+                        captureIntervalSeconds: value,
+                      }))
+                    }
+                  />
+                </section>
+
+                <section>
+                  <div className="camera-config-section-title">
+                    <strong>Video output</strong>
+                    <InfoTip title="Video output">
+                      Lower FPS and JPEG quality reduce Pi load and Tailscale
+                      bandwidth. These controls do not change the 640×360
+                      camera resolution.
+                    </InfoTip>
+                  </div>
+                  <CameraRangeControl
+                    label="Stream frame rate"
+                    value={cameraConfigDraft.streamFps}
+                    {...cameraCapabilities.streamFps}
+                    suffix=" fps"
+                    onChange={(value) =>
+                      setCameraConfigDraft((current) => ({
+                        ...current,
+                        streamFps: value,
+                      }))
+                    }
+                  />
+                  <CameraRangeControl
+                    label="JPEG quality"
+                    value={cameraConfigDraft.jpegQuality}
+                    {...cameraCapabilities.jpegQuality}
+                    suffix="%"
+                    onChange={(value) =>
+                      setCameraConfigDraft((current) => ({
+                        ...current,
+                        jpegQuality: value,
+                      }))
+                    }
+                  />
+                  <label className="camera-toggle">
+                    <span>
+                      <strong>Mirror image</strong>
+                      <small>Flip the camera horizontally</small>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={cameraConfigDraft.flipHorizontal}
+                      onChange={(event) =>
+                        setCameraConfigDraft((current) => ({
+                          ...current,
+                          flipHorizontal: event.target.checked,
+                        }))
+                      }
+                    />
+                  </label>
+                </section>
+
+                <section>
+                  <div className="camera-config-section-title">
+                    <strong>Lighting & color</strong>
+                    <InfoTip title="Webcam image controls">
+                      These map to controls supported by the connected UVC
+                      webcam and affect both the live stream and detection
+                      frames.
+                    </InfoTip>
+                  </div>
+                  <CameraRangeControl
+                    label="Brightness"
+                    value={cameraConfigDraft.brightness}
+                    {...cameraCapabilities.brightness}
+                    onChange={(value) =>
+                      setCameraConfigDraft((current) => ({
+                        ...current,
+                        brightness: value,
+                      }))
+                    }
+                  />
+                  <CameraRangeControl
+                    label="Contrast"
+                    value={cameraConfigDraft.contrast}
+                    {...cameraCapabilities.contrast}
+                    onChange={(value) =>
+                      setCameraConfigDraft((current) => ({
+                        ...current,
+                        contrast: value,
+                      }))
+                    }
+                  />
+                  <CameraRangeControl
+                    label="Saturation"
+                    value={cameraConfigDraft.saturation}
+                    {...cameraCapabilities.saturation}
+                    onChange={(value) =>
+                      setCameraConfigDraft((current) => ({
+                        ...current,
+                        saturation: value,
+                      }))
+                    }
+                  />
+                  <label className="camera-toggle">
+                    <span>
+                      <strong>Backlight compensation</strong>
+                      <small>Lift subjects against a bright background</small>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={cameraConfigDraft.backlightCompensation}
+                      onChange={(event) =>
+                        setCameraConfigDraft((current) => ({
+                          ...current,
+                          backlightCompensation: event.target.checked,
+                        }))
+                      }
+                    />
+                  </label>
+                </section>
+              </div>
+            )}
+
+            {cameraConfigError && (
+              <p className="camera-config-error">{cameraConfigError}</p>
+            )}
+            <div className="camera-config-footer">
+              <button onClick={() => setCameraConfigOpen(false)}>Cancel</button>
+              <button
+                className="camera-config-save"
+                onClick={saveCameraConfig}
+                disabled={
+                  cameraConfigLoading ||
+                  cameraConfigSaving ||
+                  !cameraConfigDirty
+                }
+              >
+                {cameraConfigSaving ? "Saving…" : "Save changes"}
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
 
       <footer className="activity-bar">
         <span className={`activity-light ${deviceOnline ? "online" : ""}`} />
