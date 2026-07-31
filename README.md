@@ -68,16 +68,17 @@ Computer vision runs continuously on the Raspberry Pi:
 - Object and face boxes are rendered into the stream before it reaches the
   browser.
 
-When a `person` detection reaches at least 60% confidence, the Pi stores one
-timestamped annotated JPEG for that presence event. It re-arms after 12 seconds
-without a qualifying person detection, preventing a stationary person from
-creating a capture every frame.
+When a `person` detection reaches at least 60% confidence, the Pi stores a
+timestamped annotated JPEG. While a qualifying person remains visible, another
+capture may be stored every five seconds. The interval is configurable through
+`TEGAR_PERSON_CAPTURE_INTERVAL_SECONDS`.
 
 Event metadata is stored in SQLite and images are stored under
 `/var/lib/tegar-camera/captures`. The archive has a strict 500 MiB budget and
 deletes its oldest records and files automatically when the limit is exceeded.
 The dashboard loads the most recent events through private Tailscale HTTPS.
-The capture card also provides a confirmation-protected **Delete all** action.
+The capture card provides server-side pagination with 10, 20, 50, or 100 images
+per page and a confirmation-protected **Delete all** action.
 Camera API CORS is currently limited to the local dashboard origins. Add the
 exact production Vercel origin to `TEGAR_CAMERA_ALLOWED_ORIGINS` on the Pi when
 the production URL is known.

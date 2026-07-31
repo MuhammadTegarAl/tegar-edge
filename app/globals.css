@@ -813,6 +813,61 @@ h2 {
   font-size: 0.65rem;
 }
 
+.capture-pagination {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 18px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.capture-pagination label,
+.capture-page-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.capture-pagination label > span,
+.capture-page-summary,
+.capture-page-buttons > span {
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
+.capture-pagination select,
+.capture-page-buttons button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  background: rgba(5, 14, 9, 0.88);
+  font-size: 0.66rem;
+}
+
+.capture-pagination select {
+  padding: 0 25px 0 9px;
+  cursor: pointer;
+}
+
+.capture-page-summary {
+  text-align: center;
+}
+
+.capture-page-buttons button {
+  padding: 0 11px;
+  color: var(--green);
+  cursor: pointer;
+}
+
+.capture-page-buttons button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .environment-card {
   margin-top: 18px;
   padding: 26px;
@@ -1710,6 +1765,19 @@ input[type="range"] {
 
   .capture-grid {
     grid-template-columns: 1fr;
+  }
+
+  .capture-pagination {
+    grid-template-columns: 1fr auto;
+  }
+
+  .capture-page-summary {
+    text-align: right;
+  }
+
+  .capture-page-buttons {
+    grid-column: 1 / -1;
+    justify-content: space-between;
   }
 
   .climate-grid {

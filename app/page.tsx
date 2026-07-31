@@ -60,6 +60,7 @@ type CameraStatus = {
     personPresent: boolean;
     personConfidence: number;
     threshold: number;
+    captureIntervalSeconds: number;
     lastEventAt?: string | null;
   };
   captures: CaptureStorage;
@@ -83,6 +84,12 @@ type PersonEvent = {
 type EventsResponse = {
   events: PersonEvent[];
   storage: CaptureStorage;
+  pagination: {
+    page: number;
+    perPage: number;
+    total: number;
+    totalPages: number;
+  };
 };
 
 type HistoryRange = "minute" | "hour" | "day" | "month";
@@ -147,6 +154,7 @@ const initialCamera: CameraStatus = {
     personPresent: false,
     personConfidence: 0,
     threshold: 0.6,
+    captureIntervalSeconds: 5,
   },
   captures: {
     count: 0,
@@ -430,6 +438,14 @@ export default function Home() {
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsDeleting, setEventsDeleting] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
+  const [eventsPage, setEventsPage] = useState(1);
+  const [eventsPerPage, setEventsPerPage] = useState(20);
+  const [eventsPagination, setEventsPagination] = useState({
+    page: 1,
+    perPage: 20,
+    total: 0,
+    totalPages: 1,
+  });
   const [historyRange, setHistoryRange] = useState<HistoryRange>("minute");
   const [history, setHistory] = useState<HistoryResponse>({
     range: "minute",
@@ -510,12 +526,17 @@ export default function Home() {
       const next = (await healthResponse.json()) as CameraStatus;
       setCamera((current) => ({ ...current, ...next, error: null }));
 
-      const eventsResponse = await fetch(`${CAMERA_BASE_URL}/events?limit=24`, {
-        cache: "no-store",
-      });
+      const eventsResponse = await fetch(
+        `${CAMERA_BASE_URL}/events?page=${eventsPage}&perPage=${eventsPerPage}`,
+        { cache: "no-store" },
+      );
       if (!eventsResponse.ok) throw new Error("Person event request failed");
       const eventData = (await eventsResponse.json()) as EventsResponse;
       setPersonEvents(eventData.events);
+      setEventsPagination(eventData.pagination);
+      if (eventData.pagination.page !== eventsPage) {
+        setEventsPage(eventData.pagination.page);
+      }
       setCamera((current) => ({ ...current, captures: eventData.storage }));
       setEventsError(null);
     } catch {
@@ -533,7 +554,7 @@ export default function Home() {
     } finally {
       if (showLoading) setEventsLoading(false);
     }
-  }, []);
+  }, [eventsPage, eventsPerPage]);
 
   useEffect(() => {
     const initial = window.setTimeout(() => refreshEdgeData(), 0);
@@ -593,6 +614,13 @@ export default function Home() {
         storage: CaptureStorage;
       };
       setPersonEvents([]);
+      setEventsPage(1);
+      setEventsPagination({
+        page: 1,
+        perPage: eventsPerPage,
+        total: 0,
+        totalPages: 1,
+      });
       setCamera((current) => ({ ...current, captures: result.storage }));
       setMessage(`${result.deleted} person captures deleted from tegar-pi.`);
     } catch {
@@ -667,6 +695,14 @@ export default function Home() {
             (camera.captures.usedBytes / camera.captures.count),
         )
       : null;
+  const captureRangeStart =
+    eventsPagination.total === 0
+      ? 0
+      : (eventsPagination.page - 1) * eventsPagination.perPage + 1;
+  const captureRangeEnd = Math.min(
+    eventsPagination.total,
+    eventsPagination.page * eventsPagination.perPage,
+  );
   const latestHistoryPoint = history.points.at(-1) ?? null;
   const historyStorageLevel = clamp(
     (history.storage.databaseBytes / Math.max(1, history.storage.limitBytes)) *
@@ -1132,8 +1168,9 @@ export default function Home() {
             </strong>
             <InfoTip title="Detection threshold">
               Person captures trigger at ≥
-              {Math.round(camera.vision.threshold * 100)}% confidence and re-arm
-              after twelve seconds without a person.
+              {Math.round(camera.vision.threshold * 100)}% confidence. While a
+              person remains visible, another capture can be saved every{" "}
+              {camera.vision.captureIntervalSeconds} seconds.
             </InfoTip>
           </div>
         </div>
@@ -1147,8 +1184,10 @@ export default function Home() {
             <div className="title-with-info">
               <h2>Detection captures</h2>
               <InfoTip title="Capture retention">
-                One image is saved for each person presence event above 60%
-                confidence. The oldest files are removed after 500 MiB.
+                A new image can be saved every{" "}
+                {camera.vision.captureIntervalSeconds} seconds while a person is
+                detected above 60% confidence. The oldest files are removed
+                after 500 MiB.
                 {estimatedCaptureCapacity
                   ? ` Current image sizes indicate room for roughly ${estimatedCaptureCapacity.toLocaleString("id-ID")} captures.`
                   : ""}
@@ -1197,7 +1236,9 @@ export default function Home() {
                   alt={`Person detected at ${formatEventTime(event.capturedAt)}`}
                   loading="lazy"
                 />
-                {index === 0 && <span className="capture-latest">Latest</span>}
+                {eventsPagination.page === 1 && index === 0 && (
+                  <span className="capture-latest">Latest</span>
+                )}
                 <div className="capture-event-copy">
                   <span>{formatEventTime(event.capturedAt)}</span>
                   <strong>{Math.round(event.confidence * 100)}% person</strong>
@@ -1215,6 +1256,57 @@ export default function Home() {
             <small>
               The Pi is watching locally and will add the first event here.
             </small>
+          </div>
+        )}
+        {eventsPagination.total > 0 && (
+          <div className="capture-pagination">
+            <label>
+              <span>Per page</span>
+              <select
+                value={eventsPerPage}
+                onChange={(event) => {
+                  setEventsPage(1);
+                  setEventsPerPage(Number(event.target.value));
+                }}
+                aria-label="Captures per page"
+              >
+                {[10, 20, 50, 100].map((size) => (
+                  <option key={size} value={size}>
+                    {size}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className="capture-page-summary">
+              {captureRangeStart}–{captureRangeEnd} of{" "}
+              {eventsPagination.total.toLocaleString("id-ID")}
+            </span>
+            <div className="capture-page-buttons">
+              <button
+                onClick={() => setEventsPage((page) => Math.max(1, page - 1))}
+                disabled={eventsPagination.page <= 1 || eventsLoading}
+                aria-label="Previous capture page"
+              >
+                Previous
+              </button>
+              <span>
+                {eventsPagination.page} / {eventsPagination.totalPages}
+              </span>
+              <button
+                onClick={() =>
+                  setEventsPage((page) =>
+                    Math.min(eventsPagination.totalPages, page + 1),
+                  )
+                }
+                disabled={
+                  eventsPagination.page >= eventsPagination.totalPages ||
+                  eventsLoading
+                }
+                aria-label="Next capture page"
+              >
+                Next
+              </button>
+            </div>
           </div>
         )}
         {eventsError && <p className="camera-error">{eventsError}</p>}
